@@ -2,18 +2,21 @@ package pe.com.mapfre.pocia.application.service.impl;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 import org.modelmapper.ModelMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import pe.com.mapfre.pocia.application.service.AuthorService;
-import pe.com.mapfre.pocia.infrastructure.exception.AuthorAlreadyExistsException;
 import pe.com.mapfre.pocia.infrastructure.exception.EntityNotFoundException;
+import pe.com.mapfre.pocia.infrastructure.mesaggins.AuthorEvent;
+import pe.com.mapfre.pocia.infrastructure.mesaggins.Publisher;
 import pe.com.mapfre.pocia.infrastructure.persistence.entity.Author;
 import pe.com.mapfre.pocia.infrastructure.persistence.repository.AuthorRepository;
 import pe.com.mapfre.pocia.presentation.api.dto.AuthorDTO;
@@ -28,6 +31,13 @@ public class AuthorServiceImpl implements AuthorService {
 
     @Autowired
     private ModelMapper modelMapper;
+
+    private final Publisher publisher;
+
+    public AuthorServiceImpl(AuthorRepository authorRepository, Publisher publisher) {
+        this.authorRepository = authorRepository;
+        this.publisher = publisher;
+    }
 
     @Override
     @Transactional(readOnly = true)
@@ -57,27 +67,49 @@ public class AuthorServiceImpl implements AuthorService {
     }
 
     @Transactional
+    @Override
     public AuthorDTO create(AuthorDTO authorDTO) {
-
-    	logger.info("Entrando al método save");
         try {
-            // Verificar si el requestId ya existe
-            Optional<AuthorDTO> existingAuthor = authorRepository.findById(authorDTO.getAuthorId())
-                    .map(author -> modelMapper.map(author, AuthorDTO.class));
-            if (existingAuthor.isPresent()) {
-            	// Si el requestId ya existe, lanzar excepción personalizada
-                throw new AuthorAlreadyExistsException("El autor con ID " + authorDTO.getAuthorId() + " ya existe.");
-            }
+            // Publicar el mensaje y esperar a que la publicación se complete
+            CompletableFuture<Void> publishFuture = publisher.sendAsync(authorDTO);
+            publishFuture.join();
 
-            // Si el requestId no existe, proceder con la creación
-            Author author = modelMapper.map(authorDTO, Author.class);
-            Author savedAuthor = authorRepository.save(author);
-            return modelMapper.map(savedAuthor, AuthorDTO.class);
+            return authorDTO;
+
         } catch (Exception e) {
-            logger.error("Error en save: ", e);
-            throw e;
+            logger.error("Error al guardar el author: " + e.getMessage());
+            return null;
         }
     }
+
+    private Author convertEventToEntity(AuthorEvent event) {
+        // Validar campos requeridos
+        if (event.getName() == null || event.getName().trim().isEmpty()) {
+            throw new IllegalArgumentException("El campo 'name' es obligatorio");
+        }
+
+        // Buscar AuthorDTO en la lista de objetos
+        AuthorDTO authorDTO = event.getObjects().stream()
+                .filter(obj -> obj instanceof AuthorDTO)
+                .map(obj -> (AuthorDTO) obj)
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("No se encontró AuthorDTO en los objetos"));
+
+        // Validar email desde el DTO
+        if (authorDTO.getEmail() == null || authorDTO.getEmail().trim().isEmpty()) {
+            throw new IllegalArgumentException("El campo 'email' es obligatorio");
+        }
+
+        // Dividir el nombre
+        String[] nameParts = event.getName().trim().split("\\s+", 2);
+
+        return Author.builder()
+                .firstName(nameParts[0])
+                .lastName(nameParts.length > 1 ? nameParts[1] : "N/A")
+                .email(authorDTO.getEmail().trim())
+                .build();
+    }
+
 
 //    @Transactional
 //    public void deleteById(Long id) {
@@ -110,24 +142,4 @@ public class AuthorServiceImpl implements AuthorService {
         }
     }
 
-    @Transactional
-    public AuthorDTO update(Long id, AuthorDTO authorDTO) {
-        logger.info("Entrando al método update con id: {}", id);
-        try {
-            return authorRepository.findById(id)
-                    .map(existingAuthor -> {
-                        modelMapper.map(authorDTO, existingAuthor);
-                        logger.info(" *************** info de entidad: "+existingAuthor.toString());
-                        Author updatedAuthor = authorRepository.save(existingAuthor);
-                        return modelMapper.map(updatedAuthor, AuthorDTO.class);
-                    })
-                    .orElseGet(() -> {
-                        authorDTO.setAuthorId(id);
-                        return create(authorDTO);
-                    });
-        } catch (Exception e) {
-            logger.error("Error en update: ", e);
-            throw e;
-        }
-    }
 }
